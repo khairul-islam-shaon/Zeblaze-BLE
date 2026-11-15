@@ -40,13 +40,19 @@ export default function App(): React.JSX.Element {
     heartRate,
     lastHeartRate,
     isMeasuringHeartRate,
+    spo2,
+    lastSpo2,
+    isMeasuringSpo2,
     stepCount,
     distanceMeters,
     calories,
     lastHeartRateTimestamp,
     startHeartRateMeasure,
     stopHeartRateMeasure,
+    startSpo2Measure,
+    stopSpo2Measure,
     queryHistoryHeartRate,
+    queryTodayActivity,
     logs,
     clearLogs,
     copyLogs,
@@ -279,16 +285,35 @@ export default function App(): React.JSX.Element {
             </View>
             <Text style={styles.metricSubText}>
               {isMeasuringHeartRate
-                ? 'Sensor active on wrist...'
+                ? 'Sensor active...'
                 : lastHeartRate
-                ? `Last: ${lastHeartRate} BPM (${lastHeartRateTimestamp || 'recent'})`
-                : 'Tap measure or sync below'}
+                ? `Last: ${lastHeartRate} BPM`
+                : 'Tap HR'}
+            </Text>
+          </View>
+
+          {/* Blood Oxygen Tile */}
+          <View style={styles.metricTile}>
+            <Text style={styles.metricTileLabel}>SPO2</Text>
+            <View style={styles.metricValueRow}>
+              <Text style={styles.metricHeartIcon}>🩸</Text>
+              <Text style={styles.metricMainValue}>
+                {spo2 ? `${spo2}` : lastSpo2 ? `${lastSpo2}` : '--'}
+              </Text>
+              <Text style={styles.metricUnit}>%</Text>
+            </View>
+            <Text style={styles.metricSubText}>
+              {isMeasuringSpo2
+                ? 'Measuring SpO2...'
+                : lastSpo2
+                ? `Last: ${lastSpo2}%`
+                : 'Tap 🩸 SpO2'}
             </Text>
           </View>
 
           {/* Daily Steps Tile */}
           <View style={styles.metricTile}>
-            <Text style={styles.metricTileLabel}>DAILY ACTIVITY</Text>
+            <Text style={styles.metricTileLabel}>DAILY STEPS</Text>
             <View style={styles.metricValueRow}>
               <Text style={styles.metricStepIcon}>👣</Text>
               <Text style={styles.metricMainValue}>
@@ -298,10 +323,10 @@ export default function App(): React.JSX.Element {
             </View>
             <Text style={styles.metricSubText}>
               {distanceMeters !== null
-                ? `${(distanceMeters / 1000).toFixed(2)} km  •  ${calories ?? 0} kcal`
+                ? `${(distanceMeters / 1000).toFixed(2)}km • ${calories ?? 0}kcal`
                 : calories
-                ? `${calories} kcal burned`
-                : 'Auto-synced from watch'}
+                ? `${calories} kcal`
+                : 'Auto-synced'}
             </Text>
           </View>
         </View>
@@ -313,7 +338,14 @@ export default function App(): React.JSX.Element {
               style={[styles.healthBtn, styles.btnStopHeartRate]}
               onPress={stopHeartRateMeasure}
             >
-              <Text style={styles.healthBtnText}>⏹ Stop Measurement</Text>
+              <Text style={styles.healthBtnText}>⏹ Stop Heart Rate</Text>
+            </TouchableOpacity>
+          ) : isMeasuringSpo2 ? (
+            <TouchableOpacity
+              style={[styles.healthBtn, styles.btnStopHeartRate]}
+              onPress={stopSpo2Measure}
+            >
+              <Text style={styles.healthBtnText}>⏹ Stop SpO2</Text>
             </TouchableOpacity>
           ) : (
             <View style={styles.healthBtnGroup}>
@@ -327,7 +359,20 @@ export default function App(): React.JSX.Element {
                 onPress={() => startHeartRateMeasure('single')}
               >
                 <Text style={styles.healthBtnText}>
-                  {!isConnected ? 'Offline' : '❤️ Measure'}
+                  {!isConnected ? 'Offline' : '❤️ HR'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.healthBtn,
+                  styles.btnStartSpo2,
+                  (!isConnected || !isSubscribed) && styles.btnDisabled,
+                ]}
+                disabled={!isConnected || !isSubscribed}
+                onPress={startSpo2Measure}
+              >
+                <Text style={styles.healthBtnText}>
+                  {!isConnected ? 'Offline' : '🩸 SpO2'}
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -350,10 +395,13 @@ export default function App(): React.JSX.Element {
                   (!isConnected || !isSubscribed) && styles.btnDisabled,
                 ]}
                 disabled={!isConnected || !isSubscribed}
-                onPress={queryHistoryHeartRate}
+                onPress={() => {
+                  queryHistoryHeartRate();
+                  queryTodayActivity();
+                }}
               >
                 <Text style={styles.healthBtnText}>
-                  {!isConnected ? 'Offline' : '🔄 Sync Last'}
+                  {!isConnected ? 'Offline' : '🔄 Sync'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -659,6 +707,9 @@ const styles = StyleSheet.create({
   },
   btnStartHeartRate: {
     backgroundColor: '#e11d48',
+  },
+  btnStartSpo2: {
+    backgroundColor: '#0284c7',
   },
   btnDynamicHeartRate: {
     backgroundColor: '#7c3aed',

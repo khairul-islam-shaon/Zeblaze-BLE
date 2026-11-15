@@ -96,37 +96,141 @@ export function parseActivityPacket(bytes: number[]): {
   calories: number;
   activeMinutes: number;
 } | null {
-  if (!bytes || bytes.length < 9) {
+  if (!bytes || bytes.length < 3) {
     return null;
   }
   const b0 = bytes[0] & 0xff;
   const b1 = bytes[1] & 0xff;
 
-  // Header 80 80
-  if (b0 === 0x80 && b1 === 0x80) {
-    // Bytes 5-8: Steps count (4 bytes Little Endian)
-    const steps =
-      (bytes[5] & 0xff) |
-      ((bytes[6] & 0xff) << 8) |
-      ((bytes[7] & 0xff) << 16) |
-      ((bytes[8] & 0xff) << 24);
+  // 1. Direct 0x33 packet: [0x33, S0, S1, D0, D1, C0, C1, C2, C3, ...]
+  if (b0 === 0x33 && bytes.length >= 7) {
+    const steps = (bytes[1] & 0xff) | ((bytes[2] & 0xff) << 8);
+    const distanceVal = (bytes[3] & 0xff) | ((bytes[4] & 0xff) << 8);
+    const calories = (bytes[5] & 0xff) | ((bytes[6] & 0xff) << 8);
+    const distance = distanceVal < 1000 ? distanceVal * 10 : distanceVal;
+    return { steps, distance, calories, activeMinutes: 0 };
+  }
 
-    // Bytes 9-10: Distance in meters (e.g. 2740 = 2.74 km)
-    const distance =
-      bytes.length >= 11
-        ? (bytes[9] & 0xff) | ((bytes[10] & 0xff) << 8)
-        : 0;
+  // 2. MoYoung V1 0xB3 response: [0x00/0x80, 0xB3, LEN, 0x00, 0x01, S0, S1, ...]
+  if ((b1 === 0xb3 || b1 === 0x33) && bytes.length >= 6) {
+    const offset = bytes.length >= 6 && (bytes[3] & 0xff) === 0x00 ? 5 : 2;
+    let steps = (bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8);
+    if (bytes.length >= offset + 4 && (bytes[offset + 2] !== 0 || bytes[offset + 3] !== 0)) {
+      const fullSteps =
+        (bytes[offset] & 0xff) |
+        ((bytes[offset + 1] & 0xff) << 8) |
+        ((bytes[offset + 2] & 0xff) << 16) |
+        ((bytes[offset + 3] & 0xff) << 24);
+      if (fullSteps > 0 && fullSteps < 200000) {
+        steps = fullSteps;
+      }
+    }
+    const distanceOffset = offset + 2;
+    const distanceVal =
+      bytes.length >= distanceOffset + 2
+        ? (bytes[distanceOffset] & 0xff) | ((bytes[distanceOffset + 1] & 0xff) << 8)
+        : Math.round(steps * 0.75);
+    const distance = distanceVal < 1000 ? distanceVal * 10 : distanceVal;
 
-    // Bytes 11-12: Burned energy in kcal (e.g. 157 kcal)
+    const calOffset = distanceOffset + 2;
     const calories =
-      bytes.length >= 13
-        ? (bytes[11] & 0xff) | ((bytes[12] & 0xff) << 8)
-        : 0;
+      bytes.length >= calOffset + 2
+        ? (bytes[calOffset] & 0xff) | ((bytes[calOffset + 1] & 0xff) << 8)
+        : Math.round(steps * 0.04);
 
-    // Bytes 13-14: Active minutes if present
+    return { steps, distance, calories, activeMinutes: 0 };
+  }
+
+  // 3. MoYoung V2: [0xfe, 0xea, 0x10, LEN, 0x33/0x08, ...]
+  if (b0 === 0xfe && b1 === 0xea && bytes.length >= 8) {
+    const cmd = bytes[4] & 0xff;
+    if (cmd === 0x33 || cmd === 0x08) {
+      const offset = 5;
+      const steps =
+        (bytes[offset] & 0xff) |
+        ((bytes[offset + 1] & 0xff) << 8) |
+        ((bytes[offset + 2] & 0xff) << 16);
+      const distance =
+        bytes.length >= offset + 5
+          ? (bytes[offset + 3] & 0xff) | ((bytes[offset + 4] & 0xff) << 8)
+          : Math.round(steps * 0.75);
+      const calories =
+        bytes.length >= offset + 7
+          ? (bytes[offset + 5] & 0xff) | ((bytes[offset + 6] & 0xff) << 8)
+          : Math.round(steps * 0.04);
+      return { steps, distance, calories, activeMinutes: 0 };
+    }
+  }
+
+  // 4. WeChat Sports GATT characteristic (0000fea1): [flags, steps 3B/4B, calories 2B/3B, distance 2B/3B]
+  if (bytes.length >= 8 && (b0 === 0x01 || b0 === 0x07)) {
+    const steps =
+      (bytes[1] & 0xff) |
+      ((bytes[2] & 0xff) << 8) |
+      ((bytes[3] & 0xff) << 16);
+    if (steps > 0 && steps < 200000) {
+      const calories =
+        bytes.length >= 6 ? (bytes[4] & 0xff) | ((bytes[5] & 0xff) << 8) : Math.round(steps * 0.04);
+      const distance =
+        bytes.length >= 8 ? (bytes[6] & 0xff) | ((bytes[7] & 0xff) << 8) : Math.round(steps * 0.75);
+      return { steps, distance, calories, activeMinutes: 0 };
+    }
+  }
+
+  // 6. MoYoung / Crrepa Activity packet (e.g. 05 81 0A 00 [steps 2B] [distance 2B] [cal] [min]):
+  if (
+    bytes.length >= 8 &&
+    ((b0 === 0x05 && b1 === 0x81) || b1 === 0x81 || (b0 === 0x80 && b1 === 0x81))
+  ) {
+    const offset = bytes.length >= 10 && bytes[3] === 0x00 ? 4 : 2;
+    const steps = (bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8);
+    const distance =
+      bytes.length >= offset + 4
+        ? (bytes[offset + 2] & 0xff) | ((bytes[offset + 3] & 0xff) << 8)
+        : Math.round(steps * 0.75);
+    const calories =
+      bytes.length >= offset + 5
+        ? (bytes[offset + 4] & 0xff)
+        : Math.round(steps * 0.04);
     const activeMinutes =
-      bytes.length >= 15
-        ? (bytes[13] & 0xff) | ((bytes[14] & 0xff) << 8)
+      bytes.length >= offset + 6 ? bytes[bytes.length - 1] & 0xff : 0;
+
+    return { steps, distance, calories, activeMinutes };
+  }
+
+  // 7. Header 80 80 (Real Zeblaze Btalk 4 Pro activity packet: 80 80 0D 00 01 [steps 4B LE] [dist 2B LE] [cal 2B LE])
+  if (b0 === 0x80 && b1 === 0x80) {
+    const offset = 5;
+    
+    // Steps count
+    let steps = 0;
+    if (bytes.length >= offset + 4) {
+      steps =
+        (bytes[offset] & 0xff) |
+        ((bytes[offset + 1] & 0xff) << 8) |
+        ((bytes[offset + 2] & 0xff) << 16) |
+        ((bytes[offset + 3] & 0xff) << 24);
+    } else if (bytes.length >= offset + 2) {
+      steps = (bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8);
+    } else if (bytes.length >= offset + 1) {
+      steps = bytes[offset] & 0xff;
+    }
+
+    // Distance in meters
+    const distance =
+      bytes.length >= offset + 6
+        ? (bytes[offset + 4] & 0xff) | ((bytes[offset + 5] & 0xff) << 8)
+        : Math.round(steps * 0.75);
+
+    // Calories in kcal
+    const calories =
+      bytes.length >= offset + 8
+        ? (bytes[offset + 6] & 0xff) | ((bytes[offset + 7] & 0xff) << 8)
+        : Math.round(steps * 0.04);
+
+    const activeMinutes =
+      bytes.length >= offset + 10
+        ? (bytes[offset + 8] & 0xff) | ((bytes[offset + 9] & 0xff) << 8)
         : 0;
 
     return { steps, distance, calories, activeMinutes };
@@ -242,6 +346,77 @@ export function parseHeartRatePacket(
         bpm: lastBpm,
         isSingleComplete: true,
       };
+    }
+  }
+
+  // Case E: Zeblaze Btalk 4 Pro / MoYoung real-time telemetry packet (80 82 07 00 01 <BPM> 00)
+  // Continuous stream on FF03 every 3s: byte 5 contains live BPM (e.g. 79, 97, 102)
+  if (
+    bytes.length >= 6 &&
+    (b1 === 0x82 || (b0 === 0x80 && b1 === 0x82)) &&
+    bytes.length < 9 // Exclude 9-byte ASCII firmware version response: 00 82 09 00 01 "1.10"
+  ) {
+    const candidateBpm = bytes[5] & 0xff;
+    if (candidateBpm >= 35 && candidateBpm <= 230) {
+      return {
+        bpm: candidateBpm,
+        isSingleComplete: false,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Parses SpO2 (Blood Oxygen) notifications (MoYoung 0x6B live or 0x37 history/snapshot).
+ */
+export function parseSpO2Packet(bytes: number[]): { spo2: number; isComplete?: boolean } | null {
+  if (!bytes || bytes.length < 4) {
+    return null;
+  }
+  const b0 = bytes[0] & 0xff;
+  const b1 = bytes[1] & 0xff;
+
+  // Case A: 0xFE 0xEA framing with command 0x6B or 0x37
+  if (bytes.length >= 6 && b0 === 0xfe && b1 === 0xea) {
+    const cmdId = bytes[4] & 0xff;
+    if (cmdId === 0x6b || cmdId === 0xeb) {
+      for (let i = 5; i < bytes.length; i++) {
+        const val = bytes[i] & 0xff;
+        if (val >= 80 && val <= 100) {
+          return { spo2: val, isComplete: cmdId === 0xeb };
+        }
+      }
+    }
+    if (cmdId === 0x37 || cmdId === 0xb7) {
+      for (let i = bytes.length - 1; i >= 5; i--) {
+        const val = bytes[i] & 0xff;
+        if (val >= 80 && val <= 100) {
+          return { spo2: val, isComplete: true };
+        }
+      }
+    }
+  }
+
+  // Case B: MoYoung V1 format: [0x00/0x80, 0x6B/0xEB/0x37/0xB7/0x84, LEN, ...]
+  // Zeblaze Btalk 4 Pro sends: 80 84 08 00 02 02 00 <SPO2 (0x62 = 98%)>
+  if (b1 === 0x84 || b1 === 0x6b || b1 === 0xeb || b1 === 0x37 || b1 === 0xb7 || b0 === 0x84) {
+    for (let i = bytes.length - 1; i >= 3; i--) {
+      const val = bytes[i] & 0xff;
+      if (val >= 80 && val <= 100) {
+        return { spo2: val, isComplete: true };
+      }
+    }
+  }
+
+  // Case C: byte 0 is 0x6B / 0x37
+  if (b0 === 0x6b || b0 === 0x37) {
+    for (let i = bytes.length - 1; i >= 1; i--) {
+      const val = bytes[i] & 0xff;
+      if (val >= 80 && val <= 100) {
+        return { spo2: val, isComplete: true };
+      }
     }
   }
 

@@ -13,6 +13,19 @@ import {
   CMD_STOP_DYNAMIC_HEART_RATE,
   CMD_STOP_ONCE_HEART_RATE,
   CMD_QUERY_TODAY_HEART_RATE,
+  CMD_START_DYNAMIC_HEART_RATE_V1,
+  CMD_START_ONCE_HEART_RATE_V1,
+  CMD_STOP_DYNAMIC_HEART_RATE_V1,
+  CMD_STOP_ONCE_HEART_RATE_V1,
+  CMD_QUERY_TODAY_HEART_RATE_V1,
+  CMD_QUERY_TODAY_ACTIVITY,
+  CMD_QUERY_REALTIME_ACTIVITY,
+  CMD_START_SPO2_V1,
+  CMD_START_SPO2_V2,
+  CMD_STOP_SPO2_V1,
+  CMD_STOP_SPO2_V2,
+  CMD_QUERY_TODAY_SPO2_V1,
+  CMD_QUERY_TODAY_SPO2_V2,
   EXPECTED_RESPONSE_BYTES,
   MAX_LOG_ENTRIES,
   OBSERVED_MAC_ADDRESS,
@@ -31,6 +44,7 @@ import {
   decodeAscii,
   parseActivityPacket,
   parseHeartRatePacket,
+  parseSpO2Packet,
 } from './bleUtils';
 import {
   BleDevice,
@@ -44,6 +58,43 @@ import {
 
 const BleManagerModule = NativeModules.BleManager;
 const bleManagerEmitter = new NativeEventEmitter(BleManagerModule);
+
+function subscribeBleEvent(
+  eventName: string,
+  methodName: string,
+  callback: (data: any) => void
+): { remove: () => void } {
+  const subs: { remove: () => void }[] = [];
+  try {
+    if (typeof (BleManager as any)[methodName] === 'function') {
+      const sub = (BleManager as any)[methodName](callback);
+      if (sub && typeof sub.remove === 'function') {
+        subs.push(sub);
+      }
+    }
+  } catch {
+    // Ignore and fallback to emitter
+  }
+  try {
+    const emitterSub = bleManagerEmitter.addListener(eventName, callback);
+    if (emitterSub && typeof emitterSub.remove === 'function') {
+      subs.push(emitterSub);
+    }
+  } catch {
+    // Ignore
+  }
+  return {
+    remove: () => {
+      subs.forEach((s) => {
+        try {
+          s.remove();
+        } catch {
+          // Ignore
+        }
+      });
+    },
+  };
+}
 
 export function useBle() {
   const [bluetoothReady, setBluetoothReady] = useState<boolean>(false);
@@ -66,6 +117,9 @@ export function useBle() {
   const [heartRate, setHeartRate] = useState<number | null>(null);
   const [lastHeartRate, setLastHeartRate] = useState<number | null>(null);
   const [isMeasuringHeartRate, setIsMeasuringHeartRate] = useState<boolean>(false);
+  const [spo2, setSpo2] = useState<number | null>(null);
+  const [lastSpo2, setLastSpo2] = useState<number | null>(null);
+  const [isMeasuringSpo2, setIsMeasuringSpo2] = useState<boolean>(false);
   const [stepCount, setStepCount] = useState<number | null>(null);
   const [distanceMeters, setDistanceMeters] = useState<number | null>(null);
   const [calories, setCalories] = useState<number | null>(null);
@@ -90,6 +144,7 @@ export function useBle() {
       message,
       rawBytes,
     };
+    console.log(`[ZEBLAZE_LOG] [${type}] ${message} ${rawBytes ? `(raw: ${rawBytes})` : ''}`);
     setLogs((prev) => [entry, ...prev].slice(0, MAX_LOG_ENTRIES));
   }, []);
 
@@ -211,16 +266,18 @@ export function useBle() {
 
   // Setup BLE Event Listeners
   useEffect(() => {
-    const stateSub = bleManagerEmitter.addListener(
+    const stateSub = subscribeBleEvent(
       'BleManagerDidUpdateState',
+      'onDidUpdateState',
       ({ state }: { state: string }) => {
         addLog('info', `Bluetooth state changed: ${state}`);
         setBluetoothReady(state === 'on');
       }
     );
 
-    const discoverSub = bleManagerEmitter.addListener(
+    const discoverSub = subscribeBleEvent(
       'BleManagerDiscoverPeripheral',
+      'onDiscoverPeripheral',
       (peripheral: { id: string; name?: string | null; rssi?: number; advertising?: any }) => {
         if (!peripheral || !peripheral.id) {
           return;
@@ -267,14 +324,19 @@ export function useBle() {
       }
     );
 
-    const stopScanSub = bleManagerEmitter.addListener('BleManagerStopScan', () => {
-      isScanningRef.current = false;
-      setIsScanning(false);
-      addLog('info', 'Scan finished or stopped.');
-    });
+    const stopScanSub = subscribeBleEvent(
+      'BleManagerStopScan',
+      'onStopScan',
+      () => {
+        isScanningRef.current = false;
+        setIsScanning(false);
+        addLog('info', 'Scan finished or stopped.');
+      }
+    );
 
-    const disconnectSub = bleManagerEmitter.addListener(
+    const disconnectSub = subscribeBleEvent(
       'BleManagerDisconnectPeripheral',
+      'onDisconnectPeripheral',
       ({ peripheral }: { peripheral: string }) => {
         addLog('warn', `Device disconnected: ${peripheral}`);
         if (connectedDeviceIdRef.current === peripheral) {
@@ -301,8 +363,9 @@ export function useBle() {
       }
     );
 
-    const notifySub = bleManagerEmitter.addListener(
+    const notifySub = subscribeBleEvent(
       'BleManagerDidUpdateValueForCharacteristic',
+      'onDidUpdateValueForCharacteristic',
       ({
         characteristic,
         value,
@@ -344,11 +407,22 @@ export function useBle() {
           );
         }
 
+        // 3. Check for SpO2 (Blood Oxygen) notification
+        const sp = parseSpO2Packet(value);
+        if (sp !== null) {
+          setSpo2(sp.spo2);
+          setLastSpo2(sp.spo2);
+          addLog('success', `[RX SPO2] ${sp.spo2}% Blood Oxygen`, rawHex);
+          if (sp.isComplete) {
+            setIsMeasuringSpo2(false);
+          }
+        }
+
         // Check if notification is from the target notify characteristic FF03
         const isNotifyChar = areUuidsEqual(characteristic, TARGET_NOTIFY_CHAR_UUID);
 
         if (!isNotifyChar) {
-          if (hr === null && act === null) {
+          if (hr === null && act === null && sp === null) {
             addLog('rx', `[RX other char ${characteristic}] ${rawHex}`);
           }
           return;
@@ -386,7 +460,7 @@ export function useBle() {
             setTestStatus('success');
             setTestMessage(`Success! ${labeledResponse}`);
           }
-        } else if (hr === null && act === null) {
+        } else if (hr === null && act === null && sp === null) {
           // Unsolicited or other notification on FF03 (e.g. 80 82 07 00 01 64 00)
           addLog('rx', `[RX notification on FF03] ${rawHex}`, rawHex);
 
@@ -614,16 +688,44 @@ export function useBle() {
         setSubscriptionStatus('subscribed');
         addLog('success', 'Successfully subscribed to FF03 notifications. Ready for test command!');
 
-        // Auto-query today's history / last recorded heart rate
+        // Auto-query today's activity (0x33), realtime activity and heart rate history
         try {
           await BleManager.writeWithoutResponse(
             device.id,
             matchedServiceUuid,
             matchedWriteChar,
-            CMD_QUERY_TODAY_HEART_RATE,
+            [0x00, 0x33, 0x04, 0x00],
             20
           );
-          addLog('info', '[TX Init] Queried watch for today history / last recorded heart rate.');
+          await BleManager.writeWithoutResponse(
+            device.id,
+            matchedServiceUuid,
+            matchedWriteChar,
+            [0xfe, 0xea, 0x10, 0x06, 0x33, 0x00],
+            20
+          );
+          await BleManager.writeWithoutResponse(
+            device.id,
+            matchedServiceUuid,
+            matchedWriteChar,
+            CMD_QUERY_TODAY_ACTIVITY,
+            20
+          );
+          await BleManager.writeWithoutResponse(
+            device.id,
+            matchedServiceUuid,
+            matchedWriteChar,
+            CMD_QUERY_REALTIME_ACTIVITY,
+            20
+          );
+          await BleManager.writeWithoutResponse(
+            device.id,
+            matchedServiceUuid,
+            matchedWriteChar,
+            CMD_QUERY_TODAY_HEART_RATE_V1,
+            20
+          );
+          addLog('info', '[TX Init] Queried watch for today activity & heart rate history.');
         } catch {
           // non-critical
         }
@@ -776,17 +878,19 @@ export function useBle() {
         };
 
         if (mode === 'single') {
-          const cmdHex = bytesToHex(CMD_START_ONCE_HEART_RATE);
-          addLog('tx', `[TX Heart Rate] Starting Single Heart Rate (0x6D: ${cmdHex})...`, cmdHex);
+          addLog('tx', '[TX Heart Rate] Starting Single Heart Rate (0x6D)...');
+          await sendPacket(CMD_START_ONCE_HEART_RATE_V1);
           await sendPacket(CMD_START_ONCE_HEART_RATE);
         } else if (mode === 'dynamic') {
-          const cmdHex = bytesToHex(CMD_START_DYNAMIC_HEART_RATE);
-          addLog('tx', `[TX Heart Rate] Starting Dynamic Heart Rate (0x68: ${cmdHex})...`, cmdHex);
+          addLog('tx', '[TX Heart Rate] Starting Dynamic Heart Rate (0x68)...');
+          await sendPacket(CMD_START_DYNAMIC_HEART_RATE_V1);
           await sendPacket(CMD_START_DYNAMIC_HEART_RATE);
         } else {
           addLog('tx', '[TX Heart Rate] Starting Heart Rate Measurement (sending 0x6D & 0x68)...');
-          await sendPacket(CMD_START_ONCE_HEART_RATE);
+          await sendPacket(CMD_START_DYNAMIC_HEART_RATE_V1);
+          await sendPacket(CMD_START_ONCE_HEART_RATE_V1);
           await sendPacket(CMD_START_DYNAMIC_HEART_RATE);
+          await sendPacket(CMD_START_ONCE_HEART_RATE);
         }
         addLog('info', '[TX Heart Rate] Command sent to FF02. Optical sensor illuminating on watch...');
       } catch (err: any) {
@@ -811,20 +915,10 @@ export function useBle() {
 
     addLog('tx', '[TX Heart Rate] Stopping heart rate measurement...');
     try {
-      await BleManager.writeWithoutResponse(
-        devId,
-        serviceUuid,
-        writeCharUuid,
-        CMD_STOP_DYNAMIC_HEART_RATE,
-        20
-      );
-      await BleManager.writeWithoutResponse(
-        devId,
-        serviceUuid,
-        writeCharUuid,
-        CMD_STOP_ONCE_HEART_RATE,
-        20
-      );
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_DYNAMIC_HEART_RATE_V1, 20);
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_ONCE_HEART_RATE_V1, 20);
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_DYNAMIC_HEART_RATE, 20);
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_ONCE_HEART_RATE, 20);
       addLog('info', '[TX Heart Rate] Measurement stopped. Sensor off.');
     } catch (err: any) {
       addLog('warn', `[TX Heart Rate] Stop command error: ${err?.message || err}`);
@@ -845,16 +939,119 @@ export function useBle() {
 
     addLog('tx', '[TX Query] Querying today history / last recorded heart rate (0x35)...');
     try {
-      await BleManager.writeWithoutResponse(
-        devId,
-        serviceUuid,
-        writeCharUuid,
-        CMD_QUERY_TODAY_HEART_RATE,
-        20
-      );
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_QUERY_TODAY_HEART_RATE_V1, 20);
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_QUERY_TODAY_HEART_RATE, 20);
       addLog('info', '[TX Query] Query command sent to FF02.');
     } catch (err: any) {
       addLog('error', `[TX Query] Failed to query: ${err?.message || err}`);
+    }
+  }, [connectionStatus, addLog]);
+
+  // Start / Stop SpO2 (Blood Oxygen) Measurement
+  const startSpo2Measure = useCallback(async () => {
+    if (!endpointsRef.current || connectionStatus !== 'connected' || subscriptionStatus !== 'subscribed') {
+      addLog('error', 'Cannot measure: Device is not connected or FF03 is not subscribed.');
+      return;
+    }
+    const { serviceUuid, writeCharUuid } = endpointsRef.current;
+    const devId = connectedDeviceIdRef.current;
+    if (!devId) {
+      return;
+    }
+    setIsMeasuringSpo2(true);
+    addLog('tx', '[TX SpO2] Starting Blood Oxygen (SpO2) measurement (0x6B)...');
+    try {
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_START_SPO2_V1, 20);
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_START_SPO2_V2, 20);
+      addLog('info', '[TX SpO2] Sensor command sent. Keep watch firmly pressed on wrist...');
+    } catch (err: any) {
+      setIsMeasuringSpo2(false);
+      addLog('error', `[TX SpO2] Failed to start: ${err?.message || err}`);
+    }
+  }, [connectionStatus, subscriptionStatus, addLog]);
+
+  const stopSpo2Measure = useCallback(async () => {
+    setIsMeasuringSpo2(false);
+    if (!endpointsRef.current || connectionStatus !== 'connected') {
+      return;
+    }
+    const { serviceUuid, writeCharUuid } = endpointsRef.current;
+    const devId = connectedDeviceIdRef.current;
+    if (!devId) {
+      return;
+    }
+    try {
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_SPO2_V1, 20);
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_SPO2_V2, 20);
+      addLog('info', '[TX SpO2] SpO2 measurement stopped.');
+    } catch {
+      // ignore
+    }
+  }, [connectionStatus, addLog]);
+
+  const queryTodaySpo2 = useCallback(async () => {
+    if (!endpointsRef.current || connectionStatus !== 'connected') {
+      return;
+    }
+    const { serviceUuid, writeCharUuid } = endpointsRef.current;
+    const devId = connectedDeviceIdRef.current;
+    if (!devId) {
+      return;
+    }
+    try {
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_QUERY_TODAY_SPO2_V1, 20);
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_QUERY_TODAY_SPO2_V2, 20);
+    } catch {
+      // ignore
+    }
+  }, [connectionStatus]);
+
+  // Query today activity (steps, distance, calories)
+  const queryTodayActivity = useCallback(async () => {
+    if (!endpointsRef.current || connectionStatus !== 'connected') {
+      addLog('warn', 'Cannot query: Device is not connected.');
+      return;
+    }
+    const { serviceUuid, writeCharUuid } = endpointsRef.current;
+    const devId = connectedDeviceIdRef.current;
+    if (!devId) {
+      return;
+    }
+
+    addLog('tx', '[TX Query] Querying today activity & steps (0x33)...');
+    try {
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, [0x00, 0x33, 0x04, 0x00], 20);
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, [0xfe, 0xea, 0x10, 0x06, 0x33, 0x00], 20);
+
+      // Also try to read 0000fea1 on Service 0000fee7 (WeChat Sports / Activity)
+      try {
+        const fee7Result = await BleManager.read(
+          devId,
+          '0000fee7-0000-1000-8000-00805f9b34fb',
+          '0000fea1-0000-1000-8000-00805f9b34fb'
+        );
+        if (fee7Result && fee7Result.length > 0) {
+          const rawHex = bytesToHex(fee7Result);
+          addLog('rx', `[RX FEE7/FEA1] ${rawHex}`, rawHex);
+          const act = parseActivityPacket(fee7Result);
+          if (act) {
+            setStepCount(act.steps);
+            setDistanceMeters(act.distance);
+            setCalories(act.calories);
+            addLog(
+              'success',
+              `[RX ACTIVITY FEA1] Steps: ${act.steps.toLocaleString()} | Distance: ${(act.distance / 1000).toFixed(2)}km | Energy: ${act.calories}kcal`,
+              rawHex
+            );
+          }
+        }
+      } catch {
+        // fee7 read is optional
+      }
+
+      addLog('info', '[TX Query] Step query (0x33) sent to FF02.');
+    } catch (err: any) {
+      addLog('error', `[TX Query] Failed to query activity: ${err?.message || err}`);
     }
   }, [connectionStatus, addLog]);
 
@@ -898,6 +1095,9 @@ export function useBle() {
     heartRate,
     lastHeartRate,
     isMeasuringHeartRate,
+    spo2,
+    lastSpo2,
+    isMeasuringSpo2,
     stepCount,
     distanceMeters,
     calories,
@@ -905,7 +1105,11 @@ export function useBle() {
     lastHeartRateTimestamp,
     startHeartRateMeasure,
     stopHeartRateMeasure,
+    startSpo2Measure,
+    stopSpo2Measure,
+    queryTodaySpo2,
     queryHistoryHeartRate,
+    queryTodayActivity,
     logs,
     clearLogs,
     copyLogs,

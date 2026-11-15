@@ -27,14 +27,34 @@ export const EXPECTED_RESPONSE_BYTES: number[] = [
 
 // Single Heart Rate Measurement (Start / Stop)
 export const CMD_START_ONCE_HEART_RATE: number[] = [0xfe, 0xea, 0x10, 0x06, 0x6d, 0x00];
+export const CMD_START_ONCE_HEART_RATE_V1: number[] = [0x00, 0x6d, 0x05, 0x00, 0x01];
 export const CMD_STOP_ONCE_HEART_RATE: number[] = [0xfe, 0xea, 0x10, 0x06, 0x6d, 0xff];
+export const CMD_STOP_ONCE_HEART_RATE_V1: number[] = [0x00, 0x6d, 0x05, 0x00, 0x00];
 
 // Dynamic / Continuous Heart Rate Measurement (Start / Stop)
 export const CMD_START_DYNAMIC_HEART_RATE: number[] = [0xfe, 0xea, 0x10, 0x06, 0x68, 0x00];
+export const CMD_START_DYNAMIC_HEART_RATE_V1: number[] = [0x00, 0x68, 0x05, 0x00, 0x01];
 export const CMD_STOP_DYNAMIC_HEART_RATE: number[] = [0xfe, 0xea, 0x10, 0x06, 0x68, 0xff];
+export const CMD_STOP_DYNAMIC_HEART_RATE_V1: number[] = [0x00, 0x68, 0x05, 0x00, 0x00];
 
 // Query Today Heart Rate / History
 export const CMD_QUERY_TODAY_HEART_RATE: number[] = [0xfe, 0xea, 0x10, 0x06, 0x35, 0x00];
+export const CMD_QUERY_TODAY_HEART_RATE_V1: number[] = [0x00, 0x35, 0x04, 0x00];
+
+// Query Steps & Activity (MoYoung V1 & V2: 0x33 is Daily Steps/Calories/Distance sync)
+export const CMD_QUERY_STEPS_V1: number[] = [0x00, 0x33, 0x04, 0x00];
+export const CMD_QUERY_STEPS_V2: number[] = [0xfe, 0xea, 0x10, 0x06, 0x33, 0x00];
+export const CMD_QUERY_TODAY_ACTIVITY: number[] = [0x00, 0x33, 0x04, 0x00];
+export const CMD_QUERY_REALTIME_ACTIVITY: number[] = [0x00, 0x07, 0x04, 0x00];
+export const CMD_QUERY_ACTIVITY_V2: number[] = [0xfe, 0xea, 0x10, 0x06, 0x33, 0x00];
+
+// Blood Oxygen (SpO2) Commands (MoYoung 0x6B start/stop, 0x37 query)
+export const CMD_START_SPO2_V1: number[] = [0x00, 0x6b, 0x05, 0x00, 0x01];
+export const CMD_START_SPO2_V2: number[] = [0xfe, 0xea, 0x10, 0x06, 0x6b, 0x00];
+export const CMD_STOP_SPO2_V1: number[] = [0x00, 0x6b, 0x05, 0x00, 0x00];
+export const CMD_STOP_SPO2_V2: number[] = [0xfe, 0xea, 0x10, 0x06, 0x6b, 0xff];
+export const CMD_QUERY_TODAY_SPO2_V1: number[] = [0x00, 0x37, 0x04, 0x00];
+export const CMD_QUERY_TODAY_SPO2_V2: number[] = [0xfe, 0xea, 0x10, 0x06, 0x37, 0x00];
 
 // Standard Bluetooth SIG Heart Rate Measurement Characteristic UUID
 export const BLE_SIG_HEART_RATE_MEASUREMENT_UUID = '00002a37-0000-1000-8000-00805f9b34fb';

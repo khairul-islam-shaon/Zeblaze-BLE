@@ -1,0 +1,3 @@
+@echo off
+echo Starting Android Phone Emulator (Medium_Phone_API_37.0)...
+"%LOCALAPPDATA%\Android\Sdk\emulator\emulator.exe" -avd Medium_Phone_API_37.0
