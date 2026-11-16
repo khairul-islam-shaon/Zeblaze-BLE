@@ -32,6 +32,7 @@ export interface HealthMetrics {
   heartRate: number | null;
   lastHeartRate: number | null;
   isMeasuringHeartRate: boolean;
+  batteryLevel: number | null;
   stepCount: number | null;
   distanceMeters: number | null;
   calories: number | null;

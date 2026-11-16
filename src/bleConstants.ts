@@ -21,7 +21,28 @@ export const EXPECTED_RESPONSE_BYTES: number[] = [
 ];
 
 // ============================================================================
-// Heart Rate & Sensor Commands (Crrepa / MoYoung BLE Protocol)
+// Verified Zeblaze / Antjy Official BLE Protocol Commands
+// ============================================================================
+
+// Enable Real-Time Pedometer / Step Stream
+// Category: 0x01, Cmd: 0x29, Length: 0x05, Payload: [0x0F, 0x00]
+export const CMD_ENABLE_REALTIME_STEPS: number[] = [0x01, 0x29, 0x05, 0x0f, 0x00];
+
+// Single Heart Rate Measurement (Start / Stop)
+// Category: 0x01, Cmd: 0x1D, Length: 0x06, Duration: 60s (0x3C), Param: 0x3C
+export const CMD_START_ZEBLAZE_HEART_RATE: number[] = [0x01, 0x1d, 0x06, 0x3c, 0x00, 0x3c];
+export const CMD_STOP_ZEBLAZE_HEART_RATE: number[] = [0x01, 0x1d, 0x06, 0x00, 0x00, 0x00];
+
+// Single Blood Oxygen (SpO2) Measurement (Start / Stop)
+// Category: 0x01, Cmd: 0x1D, Length: 0x06, Param: 0x08, Param: 0x08
+export const CMD_START_ZEBLAZE_SPO2: number[] = [0x01, 0x1d, 0x06, 0x08, 0x00, 0x08];
+export const CMD_STOP_ZEBLAZE_SPO2: number[] = [0x01, 0x1d, 0x06, 0x00, 0x00, 0x00];
+
+// Query Step History & Daily Summary
+export const CMD_QUERY_ZEBLAZE_STEP_HISTORY: number[] = [0x00, 0x33, 0x04, 0x08];
+
+// ============================================================================
+// Heart Rate & Sensor Commands (Crrepa / MoYoung BLE Protocol Fallbacks)
 // Header: 0xFE, 0xEA | MTU flag: 0x10 | Total Length: 0x06 | CMD | Payload: 0x00 (Start) / 0xFF (Stop)
 // ============================================================================
 
@@ -41,11 +62,15 @@ export const CMD_STOP_DYNAMIC_HEART_RATE_V1: number[] = [0x00, 0x68, 0x05, 0x00,
 export const CMD_QUERY_TODAY_HEART_RATE: number[] = [0xfe, 0xea, 0x10, 0x06, 0x35, 0x00];
 export const CMD_QUERY_TODAY_HEART_RATE_V1: number[] = [0x00, 0x35, 0x04, 0x00];
 
-// Query Steps & Activity (MoYoung V1 & V2: 0x33 is Daily Steps/Calories/Distance sync)
+// Query Steps & Activity (MoYoung V1 & V2: 0x59/0x5C/0x5D are Crrepa TR3 category steps queries, 0x07 realtime)
+export const CMD_QUERY_STEPS_CATEGORY_TODAY: number[] = [0xfe, 0xea, 0x10, 0x06, 0x59, 0x00];
+export const CMD_QUERY_STEPS_5C_TODAY: number[] = [0xfe, 0xea, 0x10, 0x06, 0x5c, 0x00];
+export const CMD_QUERY_STEPS_5D_TODAY: number[] = [0xfe, 0xea, 0x10, 0x06, 0x5d, 0x00];
 export const CMD_QUERY_STEPS_V1: number[] = [0x00, 0x33, 0x04, 0x00];
 export const CMD_QUERY_STEPS_V2: number[] = [0xfe, 0xea, 0x10, 0x06, 0x33, 0x00];
 export const CMD_QUERY_TODAY_ACTIVITY: number[] = [0x00, 0x33, 0x04, 0x00];
 export const CMD_QUERY_REALTIME_ACTIVITY: number[] = [0x00, 0x07, 0x04, 0x00];
+export const CMD_QUERY_REALTIME_ACTIVITY_V2: number[] = [0xfe, 0xea, 0x10, 0x06, 0x07, 0x00];
 export const CMD_QUERY_ACTIVITY_V2: number[] = [0xfe, 0xea, 0x10, 0x06, 0x33, 0x00];
 
 // Blood Oxygen (SpO2) Commands (MoYoung 0x6B start/stop, 0x37 query)

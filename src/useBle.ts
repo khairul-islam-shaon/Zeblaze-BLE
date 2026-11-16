@@ -8,6 +8,12 @@ import {
 import BleManager from 'react-native-ble-manager';
 import Clipboard from '@react-native-clipboard/clipboard';
 import {
+  CMD_ENABLE_REALTIME_STEPS,
+  CMD_START_ZEBLAZE_HEART_RATE,
+  CMD_STOP_ZEBLAZE_HEART_RATE,
+  CMD_START_ZEBLAZE_SPO2,
+  CMD_STOP_ZEBLAZE_SPO2,
+  CMD_QUERY_ZEBLAZE_STEP_HISTORY,
   CMD_START_DYNAMIC_HEART_RATE,
   CMD_START_ONCE_HEART_RATE,
   CMD_STOP_DYNAMIC_HEART_RATE,
@@ -20,6 +26,8 @@ import {
   CMD_QUERY_TODAY_HEART_RATE_V1,
   CMD_QUERY_TODAY_ACTIVITY,
   CMD_QUERY_REALTIME_ACTIVITY,
+  CMD_QUERY_STEPS_CATEGORY_TODAY,
+  CMD_QUERY_STEPS_5C_TODAY,
   CMD_START_SPO2_V1,
   CMD_START_SPO2_V2,
   CMD_STOP_SPO2_V1,
@@ -43,6 +51,7 @@ import {
   bytesToHex,
   decodeAscii,
   parseActivityPacket,
+  parseBatteryPacket,
   parseHeartRatePacket,
   parseSpO2Packet,
 } from './bleUtils';
@@ -117,6 +126,7 @@ export function useBle() {
   const [heartRate, setHeartRate] = useState<number | null>(null);
   const [lastHeartRate, setLastHeartRate] = useState<number | null>(null);
   const [isMeasuringHeartRate, setIsMeasuringHeartRate] = useState<boolean>(false);
+  const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
   const [spo2, setSpo2] = useState<number | null>(null);
   const [lastSpo2, setLastSpo2] = useState<number | null>(null);
   const [isMeasuringSpo2, setIsMeasuringSpo2] = useState<boolean>(false);
@@ -377,8 +387,15 @@ export function useBle() {
       }) => {
         const rawHex = bytesToHex(value);
 
+        // 0. Check for Battery notification (80 82 07 00 01 <BATTERY> 00)
+        const batt = parseBatteryPacket(value);
+        if (batt !== null) {
+          setBatteryLevel(batt.battery);
+          addLog('info', `[RX BATTERY] ${batt.battery}% Battery`, rawHex);
+        }
+
         // 1. Check for Real-Time or History Heart Rate notification (FF03 or 2A37)
-        const hr = parseHeartRatePacket(value, characteristic);
+        const hr = batt === null ? parseHeartRatePacket(value, characteristic) : null;
         if (hr !== null) {
           if (hr.bpm > 0) {
             setHeartRate(hr.bpm);
@@ -393,8 +410,8 @@ export function useBle() {
           }
         }
 
-        // 2. Check for Daily Activity / Step notification (80 80 ...)
-        const act = parseActivityPacket(value);
+        // 2. Check for Daily Activity / Step notification (80 80, 0x59, FEE1, etc.)
+        const act = batt === null && hr === null ? parseActivityPacket(value) : null;
         if (act !== null) {
           setStepCount(act.steps);
           setDistanceMeters(act.distance);
@@ -408,7 +425,8 @@ export function useBle() {
         }
 
         // 3. Check for SpO2 (Blood Oxygen) notification
-        const sp = parseSpO2Packet(value);
+        // Strictly isolated: Battery, Heart Rate and Activity packets will not be parsed as SpO2
+        const sp = batt === null && hr === null && act === null ? parseSpO2Packet(value) : null;
         if (sp !== null) {
           setSpo2(sp.spo2);
           setLastSpo2(sp.spo2);
@@ -422,7 +440,7 @@ export function useBle() {
         const isNotifyChar = areUuidsEqual(characteristic, TARGET_NOTIFY_CHAR_UUID);
 
         if (!isNotifyChar) {
-          if (hr === null && act === null && sp === null) {
+          if (batt === null && hr === null && act === null && sp === null) {
             addLog('rx', `[RX other char ${characteristic}] ${rawHex}`);
           }
           return;
@@ -688,8 +706,31 @@ export function useBle() {
         setSubscriptionStatus('subscribed');
         addLog('success', 'Successfully subscribed to FF03 notifications. Ready for test command!');
 
-        // Auto-query today's activity (0x33), realtime activity and heart rate history
+        // Auto-query today's activity, realtime activity, and heart rate history
         try {
+          const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+          // 0. Primary: Antjy / Zeblaze enable real-time step streaming (0x01 0x29)
+          await BleManager.writeWithoutResponse(
+            device.id,
+            matchedServiceUuid,
+            matchedWriteChar,
+            CMD_ENABLE_REALTIME_STEPS,
+            20
+          );
+          await sleep(100);
+
+          // 1. Primary: Antjy / Zeblaze query step history & summary (0x00 0x33 0x04 0x08)
+          await BleManager.writeWithoutResponse(
+            device.id,
+            matchedServiceUuid,
+            matchedWriteChar,
+            CMD_QUERY_ZEBLAZE_STEP_HISTORY,
+            20
+          );
+          await sleep(100);
+
+          // 2. Daily steps & activity summary (0x33) -> triggers 80 80 packet!
           await BleManager.writeWithoutResponse(
             device.id,
             matchedServiceUuid,
@@ -697,6 +738,7 @@ export function useBle() {
             [0x00, 0x33, 0x04, 0x00],
             20
           );
+          await sleep(100);
           await BleManager.writeWithoutResponse(
             device.id,
             matchedServiceUuid,
@@ -704,13 +746,19 @@ export function useBle() {
             [0xfe, 0xea, 0x10, 0x06, 0x33, 0x00],
             20
           );
+          await sleep(100);
+
+          // 1. Category steps today (0x59)
           await BleManager.writeWithoutResponse(
             device.id,
             matchedServiceUuid,
             matchedWriteChar,
-            CMD_QUERY_TODAY_ACTIVITY,
+            CMD_QUERY_STEPS_CATEGORY_TODAY,
             20
           );
+          await sleep(60);
+
+          // 2. Real-time activity (0x07)
           await BleManager.writeWithoutResponse(
             device.id,
             matchedServiceUuid,
@@ -718,6 +766,29 @@ export function useBle() {
             CMD_QUERY_REALTIME_ACTIVITY,
             20
           );
+          await sleep(60);
+
+          // 3. Framed 0x07
+          await BleManager.writeWithoutResponse(
+            device.id,
+            matchedServiceUuid,
+            matchedWriteChar,
+            [0xfe, 0xea, 0x10, 0x06, 0x07, 0x00],
+            20
+          );
+          await sleep(60);
+
+          // 4. Category steps alternate (0x5C)
+          await BleManager.writeWithoutResponse(
+            device.id,
+            matchedServiceUuid,
+            matchedWriteChar,
+            CMD_QUERY_STEPS_5C_TODAY,
+            20
+          );
+          await sleep(60);
+
+          // 5. Heart rate history
           await BleManager.writeWithoutResponse(
             device.id,
             matchedServiceUuid,
@@ -725,6 +796,28 @@ export function useBle() {
             CMD_QUERY_TODAY_HEART_RATE_V1,
             20
           );
+          await sleep(60);
+
+          // 6. Try reading WeChat Sports characteristic (fee1)
+          for (const sUuid of ['0000feea-0000-1000-8000-00805f9b34fb', '0000fee7-0000-1000-8000-00805f9b34fb', 'feea', 'fee7']) {
+            try {
+              const feeResult = await BleManager.read(device.id, sUuid, '0000fee1-0000-1000-8000-00805f9b34fb');
+              if (feeResult && feeResult.length > 0) {
+                const act = parseActivityPacket(feeResult);
+                if (act) {
+                  setStepCount(act.steps);
+                  setDistanceMeters(act.distance);
+                  setCalories(act.calories);
+                  setActiveMinutes(act.activeMinutes);
+                  addLog('success', `[Steps Synced on Connect] ${act.steps.toLocaleString()} steps via FEE1`);
+                  break;
+                }
+              }
+            } catch {
+              // optional
+            }
+          }
+
           addLog('info', '[TX Init] Queried watch for today activity & heart rate history.');
         } catch {
           // non-critical
@@ -878,15 +971,22 @@ export function useBle() {
         };
 
         if (mode === 'single') {
-          addLog('tx', '[TX Heart Rate] Starting Single Heart Rate (0x6D)...');
+          addLog('tx', '[TX Heart Rate] Starting Single Heart Rate (0x1D / 0x6D)...');
+          // 1. Primary: Antjy / Zeblaze official single measure command (01 1d 06 3c 00 3c)
+          await sendPacket(CMD_START_ZEBLAZE_HEART_RATE);
+          await new Promise((r) => setTimeout(r, 60));
           await sendPacket(CMD_START_ONCE_HEART_RATE_V1);
           await sendPacket(CMD_START_ONCE_HEART_RATE);
         } else if (mode === 'dynamic') {
-          addLog('tx', '[TX Heart Rate] Starting Dynamic Heart Rate (0x68)...');
+          addLog('tx', '[TX Heart Rate] Starting Dynamic Heart Rate (0x1D / 0x68)...');
+          await sendPacket(CMD_START_ZEBLAZE_HEART_RATE);
+          await new Promise((r) => setTimeout(r, 60));
           await sendPacket(CMD_START_DYNAMIC_HEART_RATE_V1);
           await sendPacket(CMD_START_DYNAMIC_HEART_RATE);
         } else {
-          addLog('tx', '[TX Heart Rate] Starting Heart Rate Measurement (sending 0x6D & 0x68)...');
+          addLog('tx', '[TX Heart Rate] Starting Heart Rate Measurement (sending 0x1D, 0x6D & 0x68)...');
+          await sendPacket(CMD_START_ZEBLAZE_HEART_RATE);
+          await new Promise((r) => setTimeout(r, 60));
           await sendPacket(CMD_START_DYNAMIC_HEART_RATE_V1);
           await sendPacket(CMD_START_ONCE_HEART_RATE_V1);
           await sendPacket(CMD_START_DYNAMIC_HEART_RATE);
@@ -915,6 +1015,7 @@ export function useBle() {
 
     addLog('tx', '[TX Heart Rate] Stopping heart rate measurement...');
     try {
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_ZEBLAZE_HEART_RATE, 20);
       await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_DYNAMIC_HEART_RATE_V1, 20);
       await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_ONCE_HEART_RATE_V1, 20);
       await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_DYNAMIC_HEART_RATE, 20);
@@ -959,8 +1060,11 @@ export function useBle() {
       return;
     }
     setIsMeasuringSpo2(true);
-    addLog('tx', '[TX SpO2] Starting Blood Oxygen (SpO2) measurement (0x6B)...');
+    addLog('tx', '[TX SpO2] Starting Blood Oxygen (SpO2) measurement (0x1D / 0x6B)...');
     try {
+      // 1. Primary: Antjy / Zeblaze official SpO2 measurement command (01 1d 06 08 00 08)
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_START_ZEBLAZE_SPO2, 20);
+      await new Promise((r) => setTimeout(r, 60));
       await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_START_SPO2_V1, 20);
       await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_START_SPO2_V2, 20);
       addLog('info', '[TX SpO2] Sensor command sent. Keep watch firmly pressed on wrist...');
@@ -981,6 +1085,7 @@ export function useBle() {
       return;
     }
     try {
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_ZEBLAZE_SPO2, 20);
       await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_SPO2_V1, 20);
       await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_STOP_SPO2_V2, 20);
       addLog('info', '[TX SpO2] SpO2 measurement stopped.');
@@ -1018,38 +1123,81 @@ export function useBle() {
       return;
     }
 
-    addLog('tx', '[TX Query] Querying today activity & steps (0x33)...');
-    try {
-      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, [0x00, 0x33, 0x04, 0x00], 20);
-      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, [0xfe, 0xea, 0x10, 0x06, 0x33, 0x00], 20);
+    addLog('tx', '[TX Query] Querying today activity & steps...');
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-      // Also try to read 0000fea1 on Service 0000fee7 (WeChat Sports / Activity)
-      try {
-        const fee7Result = await BleManager.read(
-          devId,
-          '0000fee7-0000-1000-8000-00805f9b34fb',
-          '0000fea1-0000-1000-8000-00805f9b34fb'
-        );
-        if (fee7Result && fee7Result.length > 0) {
-          const rawHex = bytesToHex(fee7Result);
-          addLog('rx', `[RX FEE7/FEA1] ${rawHex}`, rawHex);
-          const act = parseActivityPacket(fee7Result);
-          if (act) {
-            setStepCount(act.steps);
-            setDistanceMeters(act.distance);
-            setCalories(act.calories);
-            addLog(
-              'success',
-              `[RX ACTIVITY FEA1] Steps: ${act.steps.toLocaleString()} | Distance: ${(act.distance / 1000).toFixed(2)}km | Energy: ${act.calories}kcal`,
-              rawHex
-            );
+    try {
+      // 0. Primary: Antjy / Zeblaze enable real-time step streaming
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_ENABLE_REALTIME_STEPS, 20);
+      await sleep(80);
+
+      // 1. Primary: Antjy / Zeblaze query step history & summary (0x00 0x33 0x04 0x08)
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_QUERY_ZEBLAZE_STEP_HISTORY, 20);
+      await sleep(80);
+
+      // 2. Try reading WeChat Sports characteristic (fee1) on FEEA or FEE7 service
+      let feeReadSuccess = false;
+      const possibleServices = [
+        '0000feea-0000-1000-8000-00805f9b34fb',
+        '0000fee7-0000-1000-8000-00805f9b34fb',
+        'feea',
+        'fee7',
+      ];
+      for (const sUuid of possibleServices) {
+        for (const cUuid of ['0000fee1-0000-1000-8000-00805f9b34fb', 'fee1']) {
+          try {
+            const feeResult = await BleManager.read(devId, sUuid, cUuid);
+            if (feeResult && feeResult.length > 0) {
+              const rawHex = bytesToHex(feeResult);
+              addLog('rx', `[RX FEE1] ${rawHex}`, rawHex);
+              const act = parseActivityPacket(feeResult);
+              if (act) {
+                setStepCount(act.steps);
+                setDistanceMeters(act.distance);
+                setCalories(act.calories);
+                setActiveMinutes(act.activeMinutes);
+                addLog(
+                  'success',
+                  `[Steps Synced] Steps: ${act.steps.toLocaleString()} | Distance: ${(act.distance / 1000).toFixed(2)}km | Energy: ${act.calories}kcal`,
+                  rawHex
+                );
+                feeReadSuccess = true;
+                break;
+              }
+            }
+          } catch {
+            // try next
           }
         }
-      } catch {
-        // fee7 read is optional
+        if (feeReadSuccess) {
+          break;
+        }
       }
 
-      addLog('info', '[TX Query] Step query (0x33) sent to FF02.');
+      // 2. Dispatch query commands with pacing
+      // Command 0x59: category today steps
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_QUERY_STEPS_CATEGORY_TODAY, 20);
+      await sleep(60);
+
+      // Command 0x07: realtime activity V1
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_QUERY_REALTIME_ACTIVITY, 20);
+      await sleep(60);
+
+      // Command 0x07: realtime activity V2 framed
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, [0xfe, 0xea, 0x10, 0x06, 0x07, 0x00], 20);
+      await sleep(60);
+
+      // Command 0x5C: steps category today alternate
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, CMD_QUERY_STEPS_5C_TODAY, 20);
+      await sleep(60);
+
+      // 0x33 daily steps & activity summary (triggers 80 80)
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, [0x00, 0x33, 0x04, 0x00], 20);
+      await sleep(100);
+      await BleManager.writeWithoutResponse(devId, serviceUuid, writeCharUuid, [0xfe, 0xea, 0x10, 0x06, 0x33, 0x00], 20);
+      await sleep(100);
+
+      addLog('info', '[TX Query] Step & activity queries dispatched.');
     } catch (err: any) {
       addLog('error', `[TX Query] Failed to query activity: ${err?.message || err}`);
     }
@@ -1095,6 +1243,7 @@ export function useBle() {
     heartRate,
     lastHeartRate,
     isMeasuringHeartRate,
+    batteryLevel,
     spo2,
     lastSpo2,
     isMeasuringSpo2,

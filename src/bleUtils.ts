@@ -102,6 +102,50 @@ export function parseActivityPacket(bytes: number[]): {
   const b0 = bytes[0] & 0xff;
   const b1 = bytes[1] & 0xff;
 
+  // 1. Antjy / Zeblaze Official Real-time Step Stream: [0x80, 0x80, len, 0x08, 0x00, S0, S1, S2, S3, D0, D1, C0, C1]
+  // Verified from DeviceReportEventParser: f(bytes, 5, 4) = steps, f(bytes, 9, 2) = distance, f(bytes, 11, 2) = calories
+  if (b0 === 0x80 && b1 === 0x80 && bytes.length >= 13) {
+    const steps =
+      (bytes[5] & 0xff) |
+      ((bytes[6] & 0xff) << 8) |
+      ((bytes[7] & 0xff) << 16) |
+      ((bytes[8] & 0xff) << 24);
+    const distance = (bytes[9] & 0xff) | ((bytes[10] & 0xff) << 8);
+    const calories = (bytes[11] & 0xff) | ((bytes[12] & 0xff) << 8);
+    const activeMinutes =
+      bytes.length >= 15 ? (bytes[13] & 0xff) | ((bytes[14] & 0xff) << 8) : 0;
+
+    return {
+      steps: steps >= 0 && steps < 500000 ? steps : 0,
+      distance,
+      calories,
+      activeMinutes,
+    };
+  }
+
+  // 2. Antjy / Zeblaze StepDataParser (108-byte sync / history buffer):
+  // Verified from StepDataParser.b: f(bytes, 96, 4) = steps, f(bytes, 100, 4) = calories, f(bytes, 104, 4) = distance
+  if (bytes.length >= 108) {
+    const steps =
+      (bytes[96] & 0xff) |
+      ((bytes[97] & 0xff) << 8) |
+      ((bytes[98] & 0xff) << 16) |
+      ((bytes[99] & 0xff) << 24);
+    const calories =
+      (bytes[100] & 0xff) |
+      ((bytes[101] & 0xff) << 8) |
+      ((bytes[102] & 0xff) << 16) |
+      ((bytes[103] & 0xff) << 24);
+    const distance =
+      (bytes[104] & 0xff) |
+      ((bytes[105] & 0xff) << 8) |
+      ((bytes[106] & 0xff) << 16) |
+      ((bytes[107] & 0xff) << 24);
+    if (steps > 0 && steps < 500000) {
+      return { steps, distance, calories, activeMinutes: 0 };
+    }
+  }
+
   // 1. Direct 0x33 packet: [0x33, S0, S1, D0, D1, C0, C1, C2, C3, ...]
   if (b0 === 0x33 && bytes.length >= 7) {
     const steps = (bytes[1] & 0xff) | ((bytes[2] & 0xff) << 8);
@@ -141,28 +185,63 @@ export function parseActivityPacket(bytes: number[]): {
     return { steps, distance, calories, activeMinutes: 0 };
   }
 
-  // 3. MoYoung V2: [0xfe, 0xea, 0x10, LEN, 0x33/0x08, ...]
-  if (b0 === 0xfe && b1 === 0xea && bytes.length >= 8) {
+  // 3. MoYoung V2: [0xfe, 0xea, 0x10, LEN, CMD, ...]
+  if (b0 === 0xfe && b1 === 0xea && bytes.length >= 6) {
     const cmd = bytes[4] & 0xff;
-    if (cmd === 0x33 || cmd === 0x08) {
+    // 0x59 is queryStepsCategory(TODAY), 0x5C is querySteps, 0x5D is queryYesterday
+    if (cmd === 0x59 || cmd === 0x5c || cmd === 0x5d) {
+      // Sum the 30-min category interval steps (16-bit LE per interval starting at index 6)
+      let totalSteps = 0;
+      for (let i = 6; i + 1 < bytes.length; i += 2) {
+        totalSteps += (bytes[i] & 0xff) | ((bytes[i + 1] & 0xff) << 8);
+      }
+      if (totalSteps > 0 && totalSteps < 200000) {
+        return {
+          steps: totalSteps,
+          distance: Math.round(totalSteps * 0.75),
+          calories: Math.round(totalSteps * 0.04),
+          activeMinutes: 0,
+        };
+      }
+    }
+
+    // 0x07 Real-time activity or 0x33 daily summary
+    if (cmd === 0x07 || cmd === 0x33 || cmd === 0x08) {
       const offset = 5;
-      const steps =
-        (bytes[offset] & 0xff) |
-        ((bytes[offset + 1] & 0xff) << 8) |
-        ((bytes[offset + 2] & 0xff) << 16);
+      let steps = (bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8);
+      if (bytes.length >= offset + 4 && (bytes[offset + 2] !== 0 || bytes[offset + 3] !== 0)) {
+        const fullSteps =
+          (bytes[offset] & 0xff) |
+          ((bytes[offset + 1] & 0xff) << 8) |
+          ((bytes[offset + 2] & 0xff) << 16) |
+          ((bytes[offset + 3] & 0xff) << 24);
+        if (fullSteps > 0 && fullSteps < 200000) {
+          steps = fullSteps;
+        }
+      }
       const distance =
-        bytes.length >= offset + 5
-          ? (bytes[offset + 3] & 0xff) | ((bytes[offset + 4] & 0xff) << 8)
+        bytes.length >= offset + 6
+          ? (bytes[offset + 4] & 0xff) | ((bytes[offset + 5] & 0xff) << 8)
           : Math.round(steps * 0.75);
       const calories =
-        bytes.length >= offset + 7
-          ? (bytes[offset + 5] & 0xff) | ((bytes[offset + 6] & 0xff) << 8)
+        bytes.length >= offset + 8
+          ? (bytes[offset + 6] & 0xff) | ((bytes[offset + 7] & 0xff) << 8)
           : Math.round(steps * 0.04);
       return { steps, distance, calories, activeMinutes: 0 };
     }
   }
 
-  // 4. WeChat Sports GATT characteristic (0000fea1): [flags, steps 3B/4B, calories 2B/3B, distance 2B/3B]
+  // 4. WeChat Sports GATT characteristic (FEE1 / FEA1 9-byte packet or 0x01/0x07 prefix)
+  if (bytes.length === 9 && !(b0 === 0x00 && (bytes[1] & 0xff) === 0x82)) {
+    // Standard DaFit / WeChat Sports 9-byte packet: [steps 3B LE] [calories 3B LE] [distance 3B LE]
+    const steps = (bytes[0] & 0xff) | ((bytes[1] & 0xff) << 8) | ((bytes[2] & 0xff) << 16);
+    const calories = (bytes[3] & 0xff) | ((bytes[4] & 0xff) << 8) | ((bytes[5] & 0xff) << 16);
+    const distance = (bytes[6] & 0xff) | ((bytes[7] & 0xff) << 8) | ((bytes[8] & 0xff) << 16);
+    if (steps >= 0 && steps < 200000 && calories < 50000) {
+      return { steps, distance, calories, activeMinutes: 0 };
+    }
+  }
+
   if (bytes.length >= 8 && (b0 === 0x01 || b0 === 0x07)) {
     const steps =
       (bytes[1] & 0xff) |
@@ -247,6 +326,11 @@ export function parseHeartRatePacket(
   characteristicUuid?: string
 ): { bpm: number; isSingleComplete?: boolean } | null {
   if (!bytes || bytes.length < 2) {
+    return null;
+  }
+
+  // Reject battery status (80 82) and firmware version (00 82)
+  if ((bytes[1] & 0xff) === 0x82) {
     return null;
   }
 
@@ -349,75 +433,163 @@ export function parseHeartRatePacket(
     }
   }
 
-  // Case E: Zeblaze Btalk 4 Pro / MoYoung real-time telemetry packet (80 82 07 00 01 <BPM> 00)
-  // Continuous stream on FF03 every 3s: byte 5 contains live BPM (e.g. 79, 97, 102)
-  if (
-    bytes.length >= 6 &&
-    (b1 === 0x82 || (b0 === 0x80 && b1 === 0x82)) &&
-    bytes.length < 9 // Exclude 9-byte ASCII firmware version response: 00 82 09 00 01 "1.10"
-  ) {
-    const candidateBpm = bytes[5] & 0xff;
-    if (candidateBpm >= 35 && candidateBpm <= 230) {
-      return {
-        bpm: candidateBpm,
-        isSingleComplete: false,
-      };
+  // Case E: Zeblaze / Antjy Single Measurement Report Packet:
+  // Header: 0x80 0x84, Length >= 7
+  // bytes[4]: Status (0x01: Measuring in progress, 0x02: Measurement complete, 0x03: Measurement error)
+  // bytes[5]: Type Key (0x00: Heart Rate BPM)
+  // bytes[6]: Value 1 (BPM)
+  // bytes[7]: Value 2
+  if (b0 === 0x80 && b1 === 0x84 && bytes.length >= 7) {
+    const status = bytes[4] & 0xff;
+    const typeKey = bytes[5] & 0xff;
+    if (typeKey === 0x00) {
+      const bpm = (bytes[6] & 0xff) || (bytes.length >= 8 ? bytes[7] & 0xff : 0);
+      if (bpm >= 35 && bpm <= 230) {
+        return {
+          bpm,
+          isSingleComplete: status === 0x02,
+        };
+      }
+      if (status === 0x01) {
+        return {
+          bpm: 0,
+          isSingleComplete: false,
+        };
+      }
+      if (status === 0x02 && bpm > 0) {
+        return {
+          bpm,
+          isSingleComplete: true,
+        };
+      }
     }
+    // If typeKey !== 0x00, strictly reject (do not parse as HR)
+    return null;
   }
 
   return null;
 }
 
 /**
- * Parses SpO2 (Blood Oxygen) notifications (MoYoung 0x6B live or 0x37 history/snapshot).
+ * Parses battery status notifications: 80 82 07 00 01 <BATTERY_PERCENT> 00
+ * Opcode 0x82 is strictly battery/power telemetry.
  */
-export function parseSpO2Packet(bytes: number[]): { spo2: number; isComplete?: boolean } | null {
-  if (!bytes || bytes.length < 4) {
+export function parseBatteryPacket(bytes: number[]): { battery: number } | null {
+  if (!bytes || bytes.length < 6) {
     return null;
   }
   const b0 = bytes[0] & 0xff;
   const b1 = bytes[1] & 0xff;
 
-  // Case A: 0xFE 0xEA framing with command 0x6B or 0x37
+  // 80 82 07 00 01 <BATTERY> 00 (7 bytes)
+  // Exclude 9-byte ASCII firmware version response: 00 82 09 00 01 "1.10"
+  if (b0 === 0x80 && b1 === 0x82 && bytes.length === 7) {
+    const battery = bytes[5] & 0xff;
+    if (battery >= 0 && battery <= 100) {
+      return { battery };
+    }
+  }
+  return null;
+}
+
+/**
+ * Parses SpO2 (Blood Oxygen) notifications (MoYoung 0x6B live or 0x37 history/snapshot).
+ * Strictly checks sub-command IDs to avoid misinterpreting heart rate or status packets as SpO2.
+ */
+export function parseSpO2Packet(bytes: number[]): { spo2: number; isComplete?: boolean } | null {
+  if (!bytes || bytes.length < 2) {
+    return null;
+  }
+  const b0 = bytes[0] & 0xff;
+  const b1 = bytes[1] & 0xff;
+
+  // Reject heart rate telemetry (80 82) and firmware version (00 82)
+  if (b1 === 0x82) {
+    return null;
+  }
+
+  // Case A: 0xFE 0xEA framing with command 0x6B (live/complete) or 0x37/0xB7 (history)
   if (bytes.length >= 6 && b0 === 0xfe && b1 === 0xea) {
     const cmdId = bytes[4] & 0xff;
     if (cmdId === 0x6b || cmdId === 0xeb) {
-      for (let i = 5; i < bytes.length; i++) {
-        const val = bytes[i] & 0xff;
-        if (val >= 80 && val <= 100) {
-          return { spo2: val, isComplete: cmdId === 0xeb };
+      // In DaFit ui3.y, payload is at bytes[5]: onBloodOxygen(bytes[5])
+      const candidate = bytes[5] & 0xff;
+      if (candidate >= 70 && candidate <= 100) {
+        return { spo2: candidate, isComplete: cmdId === 0xeb };
+      }
+      if (bytes.length >= 7) {
+        const candidate2 = bytes[6] & 0xff;
+        if (candidate2 >= 70 && candidate2 <= 100) {
+          return { spo2: candidate2, isComplete: cmdId === 0xeb };
         }
       }
+      return null;
     }
     if (cmdId === 0x37 || cmdId === 0xb7) {
-      for (let i = bytes.length - 1; i >= 5; i--) {
-        const val = bytes[i] & 0xff;
-        if (val >= 80 && val <= 100) {
-          return { spo2: val, isComplete: true };
-        }
+      const candidate = bytes[5] & 0xff;
+      if (candidate >= 70 && candidate <= 100) {
+        return { spo2: candidate, isComplete: true };
       }
+      return null;
     }
   }
 
-  // Case B: MoYoung V1 format: [0x00/0x80, 0x6B/0xEB/0x37/0xB7/0x84, LEN, ...]
-  // Zeblaze Btalk 4 Pro sends: 80 84 08 00 02 02 00 <SPO2 (0x62 = 98%)>
-  if (b1 === 0x84 || b1 === 0x6b || b1 === 0xeb || b1 === 0x37 || b1 === 0xb7 || b0 === 0x84) {
-    for (let i = bytes.length - 1; i >= 3; i--) {
-      const val = bytes[i] & 0xff;
-      if (val >= 80 && val <= 100) {
-        return { spo2: val, isComplete: true };
+  // Case B: Zeblaze / Antjy Single Measurement Report Packet:
+  // Header: 0x80 0x84, Length >= 7
+  // bytes[4]: Status (0x01: Measuring in progress, 0x02: Measurement complete, 0x03: Measurement error)
+  // bytes[5]: Type Key (0x02: Blood Oxygen SpO2 %)
+  // bytes[6]: Value 1 (SpO2 %)
+  // bytes[7]: Value 2
+  if (b0 === 0x80 && b1 === 0x84 && bytes.length >= 7) {
+    const status = bytes[4] & 0xff;
+    const typeKey = bytes[5] & 0xff;
+    if (typeKey === 0x02) {
+      const spo2 = (bytes[6] & 0xff) || (bytes.length >= 8 ? bytes[7] & 0xff : 0);
+      if (spo2 >= 70 && spo2 <= 100) {
+        return {
+          spo2,
+          isComplete: status === 0x02,
+        };
+      }
+      if (status === 0x01) {
+        return {
+          spo2: 0,
+          isComplete: false,
+        };
+      }
+      if (status === 0x02 && spo2 > 0) {
+        return {
+          spo2,
+          isComplete: true,
+        };
       }
     }
+    // If typeKey !== 0x02, strictly reject (do not parse as SpO2)!
+    // NEVER parse a Heart Rate or other metric packet as SpO2!
+    return null;
   }
 
-  // Case C: byte 0 is 0x6B / 0x37
-  if (b0 === 0x6b || b0 === 0x37) {
-    for (let i = bytes.length - 1; i >= 1; i--) {
-      const val = bytes[i] & 0xff;
-      if (val >= 80 && val <= 100) {
-        return { spo2: val, isComplete: true };
+  // Case C: Unframed 0x6B / 0xEB packet: [0x6B/0xEB, <SPO2>]
+  if (b0 === 0x6b || b0 === 0xeb) {
+    if (bytes.length >= 2) {
+      const candidate = bytes[1] & 0xff;
+      if (candidate >= 70 && candidate <= 100) {
+        return { spo2: candidate, isComplete: b0 === 0xeb };
       }
     }
+    return null;
+  }
+
+  // Case D: MoYoung V1 response: [0x00, 0x6B/0xEB, LEN, 0x00, <SPO2>]
+  if (b0 === 0x00 && (b1 === 0x6b || b1 === 0xeb)) {
+    const offset = bytes.length >= 5 && (bytes[3] & 0xff) === 0x00 ? 4 : 2;
+    if (bytes.length > offset) {
+      const candidate = bytes[offset] & 0xff;
+      if (candidate >= 70 && candidate <= 100) {
+        return { spo2: candidate, isComplete: b1 === 0xeb };
+      }
+    }
+    return null;
   }
 
   return null;

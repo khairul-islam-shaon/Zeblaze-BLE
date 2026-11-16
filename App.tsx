@@ -40,6 +40,7 @@ export default function App(): React.JSX.Element {
     heartRate,
     lastHeartRate,
     isMeasuringHeartRate,
+    batteryLevel,
     spo2,
     lastSpo2,
     isMeasuringSpo2,
@@ -310,7 +311,9 @@ export default function App(): React.JSX.Element {
                 : 'Tap 🩸 SpO2'}
             </Text>
           </View>
+        </View>
 
+        <View style={styles.metricsGrid}>
           {/* Daily Steps Tile */}
           <View style={styles.metricTile}>
             <Text style={styles.metricTileLabel}>DAILY STEPS</Text>
@@ -327,6 +330,21 @@ export default function App(): React.JSX.Element {
                 : calories
                 ? `${calories} kcal`
                 : 'Auto-synced'}
+            </Text>
+          </View>
+
+          {/* Battery Tile */}
+          <View style={styles.metricTile}>
+            <Text style={styles.metricTileLabel}>BATTERY</Text>
+            <View style={styles.metricValueRow}>
+              <Text style={styles.metricStepIcon}>🔋</Text>
+              <Text style={styles.metricMainValue}>
+                {batteryLevel !== null ? `${batteryLevel}` : '--'}
+              </Text>
+              <Text style={styles.metricUnit}>%</Text>
+            </View>
+            <Text style={styles.metricSubText}>
+              {batteryLevel !== null ? 'Live from watch' : 'Auto-synced'}
             </Text>
           </View>
         </View>
